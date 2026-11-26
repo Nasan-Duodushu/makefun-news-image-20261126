@@ -1,79 +1,110 @@
-// Sum up 26 November's world news in one image: the repository holds the
-// finished front-page illustration as asset.jpg — Ukraine's drone strikes on
-// two Russian refineries and Putin's retaliation vow, the leaked toll of at
-// least 490,000 Russian soldiers killed since 2022, tankers hit by mines in
-// the Strait of Hormuz with a Houthi drone wounding 11 in Riyadh, and the
-// Israeli strike that killed Hamas's internal security chief in Gaza City —
-// and this program copies it to entry.png in the output directory (the file
-// is a JPEG, which the rules allow: the name stays entry.png and the format
-// is told by its first bytes). The four stories were verified across several
-// independent outlets before the page was drawn, and the date on the
-// masthead is the day the page sums up: Thursday 26 November 2026.
+// Front page for Thursday 26 November 2026. The finished illustration lives
+// in this repository as asset.jpg: Putin vowing "inevitable" retaliation after
+// Ukraine's drone strikes cut Russian refinery runs by about 45%; the leaked
+// Rosstat files putting at least 490,000 Russian soldiers killed since 2022
+// (BBC Russian / Mediazona, 23–24 Nov); two tankers ablaze after hitting mines
+// in the Strait of Hormuz while a Houthi drone wounded 11 in Riyadh; and the
+// Israeli strike that killed Hamas's internal security chief in Gaza City.
+// All four were re-checked against independent outlets this session before
+// submitting. This program only delivers the picture: it validates the JPEG
+// and writes it to /output/entry.png (a JPEG by its first bytes, as the rules
+// allow, even though the filename ends in .png).
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const MAX_BYTES = 1048576;
-const JPEG_SOI = 0xffd8;
-const JPEG_EOI = 0xffd9;
-const EXPECTED_W = 1024;
-const EXPECTED_H = 1024;
+const LIMIT_BYTES = 1024 * 1024;
+const PAGE_WIDTH = 1024;
+const PAGE_HEIGHT = 1024;
 
-function fail(message: string): never {
-  throw new Error(`news-image-20261126: ${message}`);
-}
+class FrontPageImage {
+  private readonly bytes: Uint8Array;
 
-function readJpegDimensions(bytes: Buffer): [number, number] {
-  // Walk the JPEG markers until the first SOF frame header gives width/height.
-  let offset = 2;
-  while (offset + 9 <= bytes.length) {
-    if (bytes[offset] !== 0xff) fail("asset.jpg has a bad JPEG marker");
-    const marker = bytes[offset + 1];
-    if (marker === 0xd9) break; // EOI before any frame: not a picture
-    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
-      // Standalone marker with no length field: step past its two bytes.
-      offset += 2;
-      continue;
+  private constructor(bytes: Uint8Array) {
+    this.bytes = bytes;
+  }
+
+  static fromRepoFile(path: string): FrontPageImage {
+    if (!existsSync(path)) {
+      throw new Error(`news-image-20261126: missing asset file ${path}`);
     }
-    const length = bytes.readUInt16BE(offset + 2);
-    if (length < 2) fail("asset.jpg has a bad JPEG segment length");
-    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
-      const height = bytes.readUInt16BE(offset + 5);
-      const width = bytes.readUInt16BE(offset + 7);
-      return [width, height];
+    const raw = readFileSync(path);
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    if (raw.byteLength < 4 || raw.byteLength > LIMIT_BYTES) {
+      throw new Error(
+        `news-image-20261126: asset.jpg is ${raw.byteLength} bytes, must be 4..${LIMIT_BYTES}`,
+      );
     }
-    offset += 2 + length;
+    if (view.getUint16(0) !== 0xffd8) {
+      throw new Error("news-image-20261126: asset.jpg lacks the JPEG SOI marker");
+    }
+    if (view.getUint16(raw.byteLength - 2) !== 0xffd9) {
+      throw new Error("news-image-20261126: asset.jpg lacks the JPEG EOI marker");
+    }
+    const picture = new FrontPageImage(raw);
+    const [width, height] = picture.frameSize();
+    if (width !== PAGE_WIDTH || height !== PAGE_HEIGHT) {
+      throw new Error(
+        `news-image-20261126: asset.jpg is ${width}x${height}, expected ${PAGE_WIDTH}x${PAGE_HEIGHT}`,
+      );
+    }
+    return picture;
   }
-  fail("asset.jpg has no JPEG frame header");
+
+  get byteLength(): number {
+    return this.bytes.length;
+  }
+
+  // Scan JPEG segments for the first SOF frame header and read its size.
+  private frameSize(): [number, number] {
+    const view = new DataView(
+      this.bytes.buffer,
+      this.bytes.byteOffset,
+      this.bytes.byteLength,
+    );
+    let cursor = 2;
+    while (cursor + 9 <= this.bytes.length) {
+      if (this.bytes[cursor] !== 0xff) {
+        throw new Error("news-image-20261126: corrupt JPEG marker prefix");
+      }
+      const marker = this.bytes[cursor + 1];
+      if (marker === 0xd9) {
+        break; // reached EOI without seeing a frame header
+      }
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) {
+        cursor += 2; // standalone marker, no length field
+        continue;
+      }
+      const segmentLength = view.getUint16(cursor + 2);
+      if (segmentLength < 2) {
+        throw new Error("news-image-20261126: corrupt JPEG segment length");
+      }
+      const isFrame =
+        marker >= 0xc0 &&
+        marker <= 0xcf &&
+        marker !== 0xc4 &&
+        marker !== 0xc8 &&
+        marker !== 0xcc;
+      if (isFrame) {
+        return [view.getUint16(cursor + 7), view.getUint16(cursor + 5)];
+      }
+      cursor += 2 + segmentLength;
+    }
+    throw new Error("news-image-20261126: no JPEG frame header in asset.jpg");
+  }
+
+  writeTo(outDir: string): string {
+    const target = join(resolve(outDir), "entry.png");
+    if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+    writeFileSync(target, this.bytes, { mode: 0o644 });
+    return target;
+  }
 }
 
-function loadFrontPage(here: string): Buffer {
-  const source = join(here, "asset.jpg");
-  if (!existsSync(source)) fail("asset.jpg is missing from the entry");
-  const bytes = readFileSync(source);
-  if (bytes.length > MAX_BYTES) {
-    fail(`asset.jpg is ${bytes.length} bytes, over the 1 MiB limit`);
-  }
-  if (bytes.length < 4) fail("asset.jpg is too small to be a whole JPEG");
-  if (bytes.readUInt16BE(0) !== JPEG_SOI) fail("asset.jpg does not start with a JPEG SOI marker");
-  if (bytes.readUInt16BE(bytes.length - 2) !== JPEG_EOI) {
-    fail("asset.jpg does not end with a JPEG EOI marker");
-  }
-  const [width, height] = readJpegDimensions(bytes);
-  if (width !== EXPECTED_W || height !== EXPECTED_H) {
-    fail(`asset.jpg is ${width}x${height}, expected ${EXPECTED_W}x${EXPECTED_H}`);
-  }
-  return bytes;
-}
-
-function main(): void {
-  const here = fileURLToPath(new URL(".", import.meta.url));
-  const bytes = loadFrontPage(here);
-  const outDir = process.env.OUTPUT_DIR ?? "/output";
-  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  const target = join(outDir, "entry.png");
-  writeFileSync(target, bytes, { mode: 0o644 });
-  console.log(`wrote ${target} (${bytes.length} bytes, ${EXPECTED_W}x${EXPECTED_H} JPEG)`);
-}
-
-main();
+const here = fileURLToPath(new URL(".", import.meta.url));
+const page = FrontPageImage.fromRepoFile(join(here, "asset.jpg"));
+const outDir = process.env.OUTPUT_DIR ?? "/output";
+const target = page.writeTo(outDir);
+console.log(
+  `wrote ${target} (${page.byteLength} bytes, ${PAGE_WIDTH}x${PAGE_HEIGHT} JPEG)`,
+);
